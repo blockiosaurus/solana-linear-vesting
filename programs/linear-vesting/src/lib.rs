@@ -13,6 +13,12 @@ pub enum ErrorCode {
     NotPastCliff,
     #[msg("The vesting account is already empty!")]
     AlreadyEmpty,
+    #[msg("Account already revoked!")]
+    AlreadyRevoked,
+    #[msg("Account is not revocable!")]
+    NotRevocable,
+    #[msg("Cannot revoke a fully vested account!")]
+    FullyVested,
 }
 
 #[program]
@@ -59,7 +65,39 @@ pub mod linear_vesting {
     pub fn withdraw(ctx: Context<Withdraw>) -> ProgramResult {
         let current_time = Clock::get().unwrap().unix_timestamp;
         msg!("Clock time is {}.", current_time);
-        if current_time
+        if ctx.accounts.vesting_account.revoked {
+            let return_amount = ctx.accounts.vesting_account.total_deposited_amount
+                - ctx.accounts.vesting_account.released_amount;
+            msg!("Returning full amount.");
+            msg!("Withdrawing {} tokens.", return_amount);
+            ctx.accounts.vesting_account.released_amount =
+                ctx.accounts.vesting_account.total_deposited_amount;
+
+            let (_vault_authority, vault_authority_bump) =
+                Pubkey::find_program_address(&[VAULT_AUTHORITY_PDA_SEED], ctx.program_id);
+
+            let cpi_accounts = Transfer {
+                from: ctx.accounts.vault_account.to_account_info().clone(),
+                to: ctx.accounts.beneficiary_ata.to_account_info().clone(),
+                authority: ctx.accounts.vault_authority.clone(),
+            };
+
+            let seeds = &[VAULT_AUTHORITY_PDA_SEED, &[vault_authority_bump]];
+            let signer = &[&seeds[..]];
+
+            // The beneficiary is fully vested so return remaining tokens.
+            let context = CpiContext::new_with_signer(
+                ctx.accounts.token_program.clone(),
+                cpi_accounts,
+                signer,
+            );
+
+            if return_amount > 0 {
+                token::transfer(context, return_amount)
+            } else {
+                Err(ErrorCode::AlreadyEmpty.into())
+            }
+        } else if current_time
             < (ctx.accounts.vesting_account.start_ts + ctx.accounts.vesting_account.cliff_ts)
         {
             // We haven't reached the cliff, the user can't withdraw the vested amount.
@@ -130,26 +168,49 @@ pub mod linear_vesting {
     pub fn revoke(ctx: Context<Revoke>) -> ProgramResult {
         let current_time = Clock::get().unwrap().unix_timestamp;
         msg!("Clock time is {}.", current_time);
-        let revoke_return = ctx.accounts.vesting_account.total_deposited_amount
-            - ctx.accounts.vesting_account.vested_amount(current_time);
-        //ctx.accounts.vesting_account.released_amount += vested_return;
+        if ctx.accounts.vesting_account.revocable {
+            if ctx.accounts.vesting_account.revoked {
+                Err(ErrorCode::AlreadyRevoked.into())
+            } else if current_time
+                < (ctx.accounts.vesting_account.start_ts + ctx.accounts.vesting_account.duration)
+            {
+                msg!("Clock time is {}.", current_time);
+                let revoke_return = ctx.accounts.vesting_account.total_deposited_amount
+                    - ctx.accounts.vesting_account.vested_amount(current_time);
+                //ctx.accounts.vesting_account.released_amount += vested_return;
+                ctx.accounts.vesting_account.revoked = true;
 
-        let (_vault_authority, vault_authority_bump) =
-            Pubkey::find_program_address(&[VAULT_AUTHORITY_PDA_SEED], ctx.program_id);
+                let (_vault_authority, vault_authority_bump) =
+                    Pubkey::find_program_address(&[VAULT_AUTHORITY_PDA_SEED], ctx.program_id);
 
-        let cpi_accounts = Transfer {
-            from: ctx.accounts.vault_account.to_account_info().clone(),
-            to: ctx.accounts.owner_token_account.to_account_info().clone(),
-            authority: ctx.accounts.vault_authority.clone(),
-        };
+                let cpi_accounts = Transfer {
+                    from: ctx.accounts.vault_account.to_account_info().clone(),
+                    to: ctx.accounts.owner_token_account.to_account_info().clone(),
+                    authority: ctx.accounts.vault_authority.clone(),
+                };
 
-        let seeds = &[VAULT_AUTHORITY_PDA_SEED, &[vault_authority_bump]];
-        let signer = &[&seeds[..]];
-        let context =
-            CpiContext::new_with_signer(ctx.accounts.token_program.clone(), cpi_accounts, signer);
+                let seeds = &[VAULT_AUTHORITY_PDA_SEED, &[vault_authority_bump]];
+                let signer = &[&seeds[..]];
+                let context = CpiContext::new_with_signer(
+                    ctx.accounts.token_program.clone(),
+                    cpi_accounts,
+                    signer,
+                );
 
-        msg!("Revoking {} tokens.", revoke_return);
-        token::transfer(context, revoke_return)
+                msg!("Revoking {} tokens.", revoke_return);
+                ctx.accounts.vesting_account.released_amount += revoke_return;
+                if revoke_return > 0 {
+                    token::transfer(context, revoke_return)
+                } else {
+                    Err(ErrorCode::AlreadyEmpty.into())
+                }
+            }
+            else {
+                Err(ErrorCode::FullyVested.into())
+            }
+        } else {
+            Err(ErrorCode::NotRevocable.into())
+        }
     }
 }
 
@@ -210,7 +271,7 @@ pub struct Withdraw<'info> {
 
 #[derive(Accounts)]
 pub struct Revoke<'info> {
-    #[account(mut, signer)]
+    #[account(signer)]
     pub owner: AccountInfo<'info>,
     pub mint: Account<'info, Mint>,
     #[account(mut)]
@@ -220,7 +281,6 @@ pub struct Revoke<'info> {
     #[account(mut)]
     pub vesting_account: Account<'info, VestingAccount>,
     pub vault_authority: AccountInfo<'info>,
-    //pub system_program: AccountInfo<'info>,
     pub token_program: AccountInfo<'info>,
 }
 
@@ -244,6 +304,8 @@ pub struct VestingAccount {
     pub total_deposited_amount: u64,
     /// Amount that has been released
     pub released_amount: u64,
+    /// Whether or not the contract has been revoked
+    pub revoked: bool,
 }
 
 impl VestingAccount {

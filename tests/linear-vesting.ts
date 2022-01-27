@@ -49,9 +49,6 @@ describe('linear-vesting', () => {
   anchor.setProvider(provider);
   const program = anchor.workspace.LinearVesting as Program<LinearVesting>;
 
-  let mint = null as Token;
-  let ownerTokenAccount = null;
-
   const amount = 1000000 * 10 ** 9;
 
   const owner = (provider.wallet as NodeWallet).payer;
@@ -100,7 +97,7 @@ describe('linear-vesting', () => {
     const duration = new anchor.BN(100);
     const revocable = true;
 
-    let { beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
+    let { mint, ownerTokenAccount, beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
       await setupVestingAccount(startTs, cliffTs, duration, revocable);
 
     // Wait for the full duration (in seconds) to pass.
@@ -147,7 +144,7 @@ describe('linear-vesting', () => {
     const duration = new anchor.BN(100);
     const revocable = true;
 
-    let { beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
+    let { mint, ownerTokenAccount, beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
       await setupVestingAccount(startTs, cliffTs, duration, revocable);
 
     for (let i = 0; i <= (101); i += 1) {
@@ -171,7 +168,6 @@ describe('linear-vesting', () => {
         vestingAccount
       );
 
-      //const expectedReturn = i * (amount / duration.toNumber());
       const expectedReturnMin = (i - 2) * (amount / duration.toNumber());
       const expectedReturnMax = (i + 2) * (amount / duration.toNumber());
       // NOTE: We're going to do some fuzzy matching here for two reasons:
@@ -242,7 +238,7 @@ describe('linear-vesting', () => {
     const duration = new anchor.BN(100);
     const revocable = true;
 
-    let { beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
+    let { mint, ownerTokenAccount, beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
       await setupVestingAccount(startTs, cliffTs, duration, revocable);
 
     try {
@@ -283,7 +279,6 @@ describe('linear-vesting', () => {
       assert.ok(false, "A third party should not be able to withdraw any tokens");
     }
     catch (err) {
-      console.log(err);
       assert.ok(err.message.indexOf("unknown signer") !== -1,
         "A third party should not be able to withdraw any tokens");
     }
@@ -321,7 +316,6 @@ describe('linear-vesting', () => {
     );
 
     // Check that beneficiary has received all their promised tokens.
-    console.log((await mint.getAccountInfo(beneficiaryTokenAccount.address)).amount.toNumber());
     assert.ok(
       (await mint.getAccountInfo(beneficiaryTokenAccount.address)).amount.toNumber() === amount,
       "The beneficiary has not received all of the tokens."
@@ -340,13 +334,315 @@ describe('linear-vesting', () => {
     );
   });
 
+  it("Revoke account and withdraw remaining", async () => {
+    const startTs = new anchor.BN(Date.now() / 1000);
+    const cliffTs = new anchor.BN(0);
+    const duration = new anchor.BN(100);
+    const revocable = true;
+
+    let { mint, ownerTokenAccount, beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
+      await setupVestingAccount(startTs, cliffTs, duration, revocable);
+
+    awaitTimestamp(startTs.toNumber() + (duration.toNumber() / 2));
+
+    await program.rpc.revoke({
+      accounts: {
+        owner: owner.publicKey,
+        mint: mint.publicKey,
+        vaultAccount: vaultAccount,
+        ownerTokenAccount: ownerTokenAccount.address,
+        vestingAccount: vestingAccount,
+        vaultAuthority: vaultAuthority,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      },
+      signers: [owner],
+    });
+
+    await sleepSeconds(duration.toNumber() / 2);
+
+    await program.rpc.withdraw({
+      accounts: {
+        beneficiary: beneficiary.publicKey,
+        mint: mint.publicKey,
+        beneficiaryAta: beneficiaryTokenAccount.address,
+        vaultAccount: vaultAccount,
+        vestingAccount: vestingAccount,
+        vaultAuthority: vaultAuthority,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      },
+      signers: [beneficiary],
+    });
+
+    // Use fuzzy matching based off of half of the token supply.
+    const expectedReturnMin = ((duration.toNumber() / 2) - 2) * (amount / duration.toNumber());
+    const expectedReturnMax = ((duration.toNumber() / 2) + 2) * (amount / duration.toNumber());
+    assert.ok(
+      (await mint.getAccountInfo(beneficiaryTokenAccount.address)).amount.toNumber() >= expectedReturnMin &&
+      (await mint.getAccountInfo(beneficiaryTokenAccount.address)).amount.toNumber() <= expectedReturnMax,
+      "The beneficiary has not received all of the vested tokens."
+    );
+    // Check that the released amount corresponds to the expected return.
+    assert.ok(
+      (await mint.getAccountInfo(ownerTokenAccount.address)).amount.toNumber() >= expectedReturnMin &&
+      (await mint.getAccountInfo(ownerTokenAccount.address)).amount.toNumber() <= expectedReturnMax,
+      "The token owner has not received the revoked tokens."
+    );
+  });
+
+  it("Revoke account during cliff and withdraw remaining", async () => {
+    const startTs = new anchor.BN(Date.now() / 1000);
+    const cliffTs = new anchor.BN(100);
+    const duration = new anchor.BN(100);
+    const revocable = true;
+
+    let { mint, ownerTokenAccount, beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
+      await setupVestingAccount(startTs, cliffTs, duration, revocable);
+
+    awaitTimestamp(startTs.toNumber() + (duration.toNumber() / 2));
+
+    await program.rpc.revoke({
+      accounts: {
+        owner: owner.publicKey,
+        mint: mint.publicKey,
+        vaultAccount: vaultAccount,
+        ownerTokenAccount: ownerTokenAccount.address,
+        vestingAccount: vestingAccount,
+        vaultAuthority: vaultAuthority,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      },
+      signers: [owner],
+    });
+
+    await sleepSeconds(duration.toNumber() / 2);
+
+    await program.rpc.withdraw({
+      accounts: {
+        beneficiary: beneficiary.publicKey,
+        mint: mint.publicKey,
+        beneficiaryAta: beneficiaryTokenAccount.address,
+        vaultAccount: vaultAccount,
+        vestingAccount: vestingAccount,
+        vaultAuthority: vaultAuthority,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      },
+      signers: [beneficiary],
+    });
+
+    // Use fuzzy matching based off of half of the token supply.
+    const expectedReturnMin = ((duration.toNumber() / 2) - 2) * (amount / duration.toNumber());
+    const expectedReturnMax = ((duration.toNumber() / 2) + 2) * (amount / duration.toNumber());
+    assert.ok(
+      (await mint.getAccountInfo(beneficiaryTokenAccount.address)).amount.toNumber() >= expectedReturnMin &&
+      (await mint.getAccountInfo(beneficiaryTokenAccount.address)).amount.toNumber() <= expectedReturnMax,
+      "The beneficiary has not received all of the vested tokens."
+    );
+    // Check that the released amount corresponds to the expected return.
+    assert.ok(
+      (await mint.getAccountInfo(ownerTokenAccount.address)).amount.toNumber() >= expectedReturnMin &&
+      (await mint.getAccountInfo(ownerTokenAccount.address)).amount.toNumber() <= expectedReturnMax,
+      "The token owner has not received the revoked tokens."
+    );
+  });
+
+  it("Revoke after vestment period is over", async () => {
+    const startTs = new anchor.BN(Date.now() / 1000);
+    const cliffTs = new anchor.BN(0);
+    const duration = new anchor.BN(100);
+    const revocable = true;
+
+    let { mint, ownerTokenAccount, beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
+      await setupVestingAccount(startTs, cliffTs, duration, revocable);
+
+    await sleepSeconds(duration);
+
+    try {
+      await program.rpc.revoke({
+        accounts: {
+          owner: owner.publicKey,
+          mint: mint.publicKey,
+          vaultAccount: vaultAccount,
+          ownerTokenAccount: ownerTokenAccount.address,
+          vestingAccount: vestingAccount,
+          vaultAuthority: vaultAuthority,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        },
+        signers: [owner],
+      });
+      assert.ok(false, "Revoke should fail when the account is already fully vested!");
+    }
+    catch (err) {
+      assert.ok(err.msg === "Cannot revoke a fully vested account!", "Revoke should fail when the account is already fully vested!");
+    }
+
+    await program.rpc.withdraw({
+      accounts: {
+        beneficiary: beneficiary.publicKey,
+        mint: mint.publicKey,
+        beneficiaryAta: beneficiaryTokenAccount.address,
+        vaultAccount: vaultAccount,
+        vestingAccount: vestingAccount,
+        vaultAuthority: vaultAuthority,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      },
+      signers: [beneficiary],
+    });
+
+    //console.log((await mint.getAccountInfo(beneficiaryTokenAccount.address)).amount.toNumber());
+    assert.ok(
+      (await mint.getAccountInfo(beneficiaryTokenAccount.address)).amount.toNumber() === amount,
+      "The beneficiary has not received all of the tokens."
+    );
+    // Check that the released amount corresponds to the expected return.
+    assert.ok(
+      (await mint.getAccountInfo(ownerTokenAccount.address)).amount.toNumber() === 0,
+      "The token owner should not have received any tokens."
+    );
+  });
+
+  it("Revoke unrevocable account", async () => {
+    const startTs = new anchor.BN(Date.now() / 1000);
+    const cliffTs = new anchor.BN(0);
+    const duration = new anchor.BN(100);
+    const revocable = false;
+
+    let { mint, ownerTokenAccount, beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
+      await setupVestingAccount(startTs, cliffTs, duration, revocable);
+
+    await sleepSeconds(duration);
+
+    try {
+      await program.rpc.revoke({
+        accounts: {
+          owner: owner.publicKey,
+          mint: mint.publicKey,
+          vaultAccount: vaultAccount,
+          ownerTokenAccount: ownerTokenAccount.address,
+          vestingAccount: vestingAccount,
+          vaultAuthority: vaultAuthority,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        },
+        signers: [owner],
+      });
+      assert.ok(false, "It should not be possible to revoke an unrevocable account!");
+    }
+    catch (err) {
+      assert.ok(err.msg === "Account is not revocable!",
+        "An unrevocable account should not accept revoke commands!");
+    }
+
+    await program.rpc.withdraw({
+      accounts: {
+        beneficiary: beneficiary.publicKey,
+        mint: mint.publicKey,
+        beneficiaryAta: beneficiaryTokenAccount.address,
+        vaultAccount: vaultAccount,
+        vestingAccount: vestingAccount,
+        vaultAuthority: vaultAuthority,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      },
+      signers: [beneficiary],
+    });
+
+    assert.ok(
+      (await mint.getAccountInfo(beneficiaryTokenAccount.address)).amount.toNumber() === amount,
+      "The beneficiary has not received all of the tokens."
+    );
+    // Check that the released amount corresponds to the expected return.
+    assert.ok(
+      (await mint.getAccountInfo(ownerTokenAccount.address)).amount.toNumber() === 0,
+      "The token owner should not have received any tokens."
+    );
+  });
+
+  it("Revoke twice", async () => {
+    const startTs = new anchor.BN(Date.now() / 1000);
+    const cliffTs = new anchor.BN(0);
+    const duration = new anchor.BN(100);
+    const revocable = true;
+
+    let { mint, ownerTokenAccount, beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
+      await setupVestingAccount(startTs, cliffTs, duration, revocable);
+
+    await program.rpc.revoke({
+      accounts: {
+        owner: owner.publicKey,
+        mint: mint.publicKey,
+        vaultAccount: vaultAccount,
+        ownerTokenAccount: ownerTokenAccount.address,
+        vestingAccount: vestingAccount,
+        vaultAuthority: vaultAuthority,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      },
+      signers: [owner],
+    });
+
+    try {
+      await program.rpc.revoke({
+        accounts: {
+          owner: owner.publicKey,
+          mint: mint.publicKey,
+          vaultAccount: vaultAccount,
+          ownerTokenAccount: ownerTokenAccount.address,
+          vestingAccount: vestingAccount,
+          vaultAuthority: vaultAuthority,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        },
+        signers: [owner],
+      });
+      assert.ok(false, "It should not be possible to revoke an account twice!");
+    }
+    catch (err) {
+      assert.ok(err.msg === "Account already revoked!",
+        "It should not be possible to revoke an account twice!");
+    }
+  });
+
+  it("Revoke by third party", async () => {
+    const startTs = new anchor.BN(Date.now() / 1000);
+    const cliffTs = new anchor.BN(0);
+    const duration = new anchor.BN(100);
+    const revocable = true;
+
+    let { mint, ownerTokenAccount, beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
+      await setupVestingAccount(startTs, cliffTs, duration, revocable);
+
+      try {
+        await program.rpc.revoke({
+          accounts: {
+            owner: owner.publicKey,
+            mint: mint.publicKey,
+            vaultAccount: vaultAccount,
+            ownerTokenAccount: ownerTokenAccount.address,
+            vestingAccount: vestingAccount,
+            vaultAuthority: vaultAuthority,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          },
+          signers: [anchor.web3.Keypair.generate()],
+        });
+        assert.ok(false, "A third party should not be able to revoke an account!");
+      }
+      catch (err) {
+        assert.ok(err.message.indexOf("unknown signer") !== -1,
+        "A third party should not be able to revoke an account!");
+      }
+
+      let _vestingAccount = await program.account.vestingAccount.fetch(
+        vestingAccount
+      );
+
+      assert.ok(
+        _vestingAccount.releasedAmount.toNumber() === 0,
+        "Not all funds have been released at completion."
+      );
+  });
+
   async function setupVestingAccount(
     startTs: anchor.BN,
     cliffTs: anchor.BN,
     duration: anchor.BN,
     revocable: boolean
   ) {
-    mint = await Token.createMint(
+    let mint = await Token.createMint(
       provider.connection,
       mintAuthority,
       mintAuthority.publicKey,
@@ -355,7 +651,7 @@ describe('linear-vesting', () => {
       TOKEN_PROGRAM_ID
     );
 
-    ownerTokenAccount = await mint.getOrCreateAssociatedAccountInfo(
+    let ownerTokenAccount = await mint.getOrCreateAssociatedAccountInfo(
       owner.publicKey
     );
 
