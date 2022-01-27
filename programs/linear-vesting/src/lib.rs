@@ -7,11 +7,17 @@ declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
 const VAULT_PDA_SEED: &[u8] = b"token-vault";
 const VAULT_AUTHORITY_PDA_SEED: &[u8] = b"vault-authority";
 
+#[error]
+pub enum ErrorCode {
+    #[msg("Not yet past the cliff!")]
+    NotPastCliff,
+    #[msg("The vesting account is already empty!")]
+    AlreadyEmpty,
+}
 
 #[program]
 pub mod linear_vesting {
     use super::*;
-
 
     pub fn initialize(
         ctx: Context<Initialize>,
@@ -33,7 +39,6 @@ pub mod linear_vesting {
         ctx.accounts.vesting_account.total_deposited_amount = amount;
         ctx.accounts.vesting_account.released_amount = 0;
 
-
         let (vault_authority, _vault_authority_bump) =
             Pubkey::find_program_address(&[VAULT_AUTHORITY_PDA_SEED], ctx.program_id);
 
@@ -51,6 +56,101 @@ pub mod linear_vesting {
         Ok(())
     }
 
+    pub fn withdraw(ctx: Context<Withdraw>) -> ProgramResult {
+        let current_time = Clock::get().unwrap().unix_timestamp;
+        msg!("Clock time is {}.", current_time);
+        if current_time
+            < (ctx.accounts.vesting_account.start_ts + ctx.accounts.vesting_account.cliff_ts)
+        {
+            // We haven't reached the cliff, the user can't withdraw the vested amount.
+            msg!("Not yet past the cliff!");
+            //return 0;
+            Err(ErrorCode::NotPastCliff.into())
+        } else if current_time
+            < (ctx.accounts.vesting_account.start_ts + ctx.accounts.vesting_account.duration)
+        {
+            let vested_return = ctx.accounts.vesting_account.vested_amount(current_time)
+                - ctx.accounts.vesting_account.released_amount;
+            ctx.accounts.vesting_account.released_amount += vested_return;
+
+            let (_vault_authority, vault_authority_bump) =
+                Pubkey::find_program_address(&[VAULT_AUTHORITY_PDA_SEED], ctx.program_id);
+
+            let cpi_accounts = Transfer {
+                from: ctx.accounts.vault_account.to_account_info().clone(),
+                to: ctx.accounts.beneficiary_ata.to_account_info().clone(),
+                authority: ctx.accounts.vault_authority.clone(),
+            };
+
+            let seeds = &[VAULT_AUTHORITY_PDA_SEED, &[vault_authority_bump]];
+            let signer = &[&seeds[..]];
+            let context = CpiContext::new_with_signer(
+                ctx.accounts.token_program.clone(),
+                cpi_accounts,
+                signer,
+            );
+
+            msg!("Withdrawing {} tokens.", vested_return);
+            token::transfer(context, vested_return)
+        } else {
+            let (_vault_authority, vault_authority_bump) =
+                Pubkey::find_program_address(&[VAULT_AUTHORITY_PDA_SEED], ctx.program_id);
+
+            let cpi_accounts = Transfer {
+                from: ctx.accounts.vault_account.to_account_info().clone(),
+                to: ctx.accounts.beneficiary_ata.to_account_info().clone(),
+                authority: ctx.accounts.vault_authority.clone(),
+            };
+
+            let seeds = &[VAULT_AUTHORITY_PDA_SEED, &[vault_authority_bump]];
+            let signer = &[&seeds[..]];
+
+            // The beneficiary is fully vested so return remaining tokens.
+            let context = CpiContext::new_with_signer(
+                ctx.accounts.token_program.clone(),
+                cpi_accounts,
+                signer,
+            );
+
+            let return_amount = ctx.accounts.vesting_account.total_deposited_amount
+                - ctx.accounts.vesting_account.released_amount;
+            msg!("Returning full amount.");
+            msg!("Withdrawing {} tokens.", return_amount);
+            ctx.accounts.vesting_account.released_amount =
+                ctx.accounts.vesting_account.total_deposited_amount;
+
+            if return_amount > 0 {
+                token::transfer(context, return_amount)
+            } else {
+                Err(ErrorCode::AlreadyEmpty.into())
+            }
+        }
+    }
+
+    pub fn revoke(ctx: Context<Revoke>) -> ProgramResult {
+        let current_time = Clock::get().unwrap().unix_timestamp;
+        msg!("Clock time is {}.", current_time);
+        let revoke_return = ctx.accounts.vesting_account.total_deposited_amount
+            - ctx.accounts.vesting_account.vested_amount(current_time);
+        //ctx.accounts.vesting_account.released_amount += vested_return;
+
+        let (_vault_authority, vault_authority_bump) =
+            Pubkey::find_program_address(&[VAULT_AUTHORITY_PDA_SEED], ctx.program_id);
+
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.vault_account.to_account_info().clone(),
+            to: ctx.accounts.owner_token_account.to_account_info().clone(),
+            authority: ctx.accounts.vault_authority.clone(),
+        };
+
+        let seeds = &[VAULT_AUTHORITY_PDA_SEED, &[vault_authority_bump]];
+        let signer = &[&seeds[..]];
+        let context =
+            CpiContext::new_with_signer(ctx.accounts.token_program.clone(), cpi_accounts, signer);
+
+        msg!("Revoking {} tokens.", revoke_return);
+        token::transfer(context, revoke_return)
+    }
 }
 
 #[derive(Accounts)]
@@ -92,6 +192,37 @@ pub struct Initialize<'info> {
     pub token_program: AccountInfo<'info>,
 }
 
+#[derive(Accounts)]
+pub struct Withdraw<'info> {
+    #[account(signer)]
+    pub beneficiary: AccountInfo<'info>,
+    pub mint: Account<'info, Mint>,
+    #[account(mut)]
+    pub beneficiary_ata: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub vault_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub vesting_account: Account<'info, VestingAccount>,
+    pub vault_authority: AccountInfo<'info>,
+    //pub system_program: AccountInfo<'info>,
+    pub token_program: AccountInfo<'info>,
+}
+
+#[derive(Accounts)]
+pub struct Revoke<'info> {
+    #[account(mut, signer)]
+    pub owner: AccountInfo<'info>,
+    pub mint: Account<'info, Mint>,
+    #[account(mut)]
+    pub vault_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub owner_token_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub vesting_account: Account<'info, VestingAccount>,
+    pub vault_authority: AccountInfo<'info>,
+    //pub system_program: AccountInfo<'info>,
+    pub token_program: AccountInfo<'info>,
+}
 
 #[account]
 pub struct VestingAccount {
@@ -115,6 +246,28 @@ pub struct VestingAccount {
     pub released_amount: u64,
 }
 
+impl VestingAccount {
+    fn vested_amount(&self, current_time: i64) -> u64 {
+        // Return the current amount vested.
+        // We vest during the cliff so use the start_ts rather than the cliff_ts as the start.
+        msg!("Returning currently vested amount.");
+        let multiplier = (current_time - self.start_ts) as f64 / self.duration as f64;
+        msg!(
+            "Multiplier = {} - {} / {}",
+            current_time,
+            self.start_ts,
+            self.duration
+        );
+        msg!(
+            "Return = {} * {} - {}",
+            self.total_deposited_amount as f64,
+            multiplier,
+            self.released_amount as f64
+        );
+        return ((self.total_deposited_amount as f64) * multiplier) as u64;
+    }
+}
+
 impl<'info> Initialize<'info> {
     fn into_transfer_to_pda_context(&self) -> CpiContext<'_, '_, '_, 'info, Transfer<'info>> {
         let cpi_accounts = Transfer {
@@ -132,4 +285,31 @@ impl<'info> Initialize<'info> {
         };
         CpiContext::new(self.token_program.clone(), cpi_accounts)
     }
+}
+
+impl<'info> Withdraw<'info> {
+    // fn withdraw_to_beneficiary_context(
+    //     &self,
+    //     seeds: &[u8],
+    //     vault_authority: AccountInfo<'info>,
+    // ) -> CpiContext<'_, '_, '_, 'info, Transfer<'info>> {
+    //     //let (vault_authority, _vault_authority_bump) =
+    //     //    Pubkey::find_program_address(&[VAULT_AUTHORITY_PDA_SEED], program_id);
+
+    //     let cpi_accounts = Transfer {
+    //         from: self.vault_account.to_account_info().clone(),
+    //         to: self.beneficiary_ata.to_account_info().clone(),
+    //         authority: vault_authority,
+    //     };
+
+    //     // let (vault_authority, vault_authority_bump) =
+    //     //     Pubkey::find_program_address(&[VAULT_AUTHORITY_PDA_SEED], program_id);
+    //     // //let seeds = &[VAULT_AUTHORITY_PDA_SEED, &[vault_authority_bump]];
+    //     //CpiContext::new(self.token_program.clone(), cpi_accounts)
+    //     // CpiContext::new_with_signer(
+    //     //     self.token_program.clone(),
+    //     //     cpi_accounts,
+    //     //     &[seeds],
+    //     // )
+    // }
 }
