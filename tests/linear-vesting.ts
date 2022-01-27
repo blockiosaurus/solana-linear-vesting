@@ -168,13 +168,13 @@ describe('linear-vesting', () => {
         vestingAccount
       );
 
-      const expectedReturnMin = (i - 2) * (amount / duration.toNumber());
-      const expectedReturnMax = (i + 2) * (amount / duration.toNumber());
       // NOTE: We're going to do some fuzzy matching here for two reasons:
       // 1. Execution time is non-deterministic so it's not guaranteed the exact time-offset we'll be withdrawing at.
       // 2. Solana's Clock sysvar is set at the beginning of each slot and each slot is at least 400ms which doesn't divide
       //  evenly into one second, so we can't guarantee that the expected value matches up with the test code timestamp.
       // Check that beneficiary has received all vested tokens at this time.
+      const expectedReturnMin = (i - 2) * (amount / duration.toNumber());
+      const expectedReturnMax = (i + 2) * (amount / duration.toNumber());
       assert.ok(
         (await mint.getAccountInfo(beneficiaryTokenAccount.address)).amount.toNumber() >= expectedReturnMin &&
         (await mint.getAccountInfo(beneficiaryTokenAccount.address)).amount.toNumber() <= expectedReturnMax,
@@ -241,6 +241,8 @@ describe('linear-vesting', () => {
     let { mint, ownerTokenAccount, beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
       await setupVestingAccount(startTs, cliffTs, duration, revocable);
 
+    // Attempt to withdraw before the cliff and catch the custom program error to validate
+    // it's what we expect.
     try {
       await program.rpc.withdraw({
         accounts: {
@@ -261,6 +263,8 @@ describe('linear-vesting', () => {
         "Withdrawal should fail when we're not past the cliff!");
     }
 
+    // Attempt to withdraw with a third-party signer and catch the custom program error to validate
+    // it's what we expect.
     try {
       // Wait for the full duration (in seconds) to pass.
       await sleepSeconds(duration);
@@ -345,6 +349,8 @@ describe('linear-vesting', () => {
 
     awaitTimestamp(startTs.toNumber() + (duration.toNumber() / 2));
 
+    // The owner revokes and the user withdraws halfway through so both should get about
+    // half of the tokens.
     await program.rpc.revoke({
       accounts: {
         owner: owner.publicKey,
@@ -455,6 +461,8 @@ describe('linear-vesting', () => {
 
     await sleepSeconds(duration);
 
+    // Revoke after the user is fully vested and verify that we get an error signifying
+    // that nothing is left to be returned to the owner.
     try {
       await program.rpc.revoke({
         accounts: {
@@ -487,7 +495,6 @@ describe('linear-vesting', () => {
       signers: [beneficiary],
     });
 
-    //console.log((await mint.getAccountInfo(beneficiaryTokenAccount.address)).amount.toNumber());
     assert.ok(
       (await mint.getAccountInfo(beneficiaryTokenAccount.address)).amount.toNumber() === amount,
       "The beneficiary has not received all of the tokens."
@@ -510,6 +517,7 @@ describe('linear-vesting', () => {
 
     await sleepSeconds(duration);
 
+    // Attempt to revoke an unrevocable account and verify that it throwns an error.
     try {
       await program.rpc.revoke({
         accounts: {
@@ -563,6 +571,7 @@ describe('linear-vesting', () => {
     let { mint, ownerTokenAccount, beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
       await setupVestingAccount(startTs, cliffTs, duration, revocable);
 
+    // The first revoke should succeed.
     await program.rpc.revoke({
       accounts: {
         owner: owner.publicKey,
@@ -576,6 +585,8 @@ describe('linear-vesting', () => {
       signers: [owner],
     });
 
+    // The second revoke should fail and throw an error saying the account has already been
+    // revoked.
     try {
       await program.rpc.revoke({
         accounts: {
@@ -606,42 +617,45 @@ describe('linear-vesting', () => {
     let { mint, ownerTokenAccount, beneficiaryTokenAccount, vaultAccount, vestingAccount, vaultAuthority } =
       await setupVestingAccount(startTs, cliffTs, duration, revocable);
 
-      try {
-        await program.rpc.revoke({
-          accounts: {
-            owner: owner.publicKey,
-            mint: mint.publicKey,
-            vaultAccount: vaultAccount,
-            ownerTokenAccount: ownerTokenAccount.address,
-            vestingAccount: vestingAccount,
-            vaultAuthority: vaultAuthority,
-            tokenProgram: TOKEN_PROGRAM_ID,
-          },
-          signers: [anchor.web3.Keypair.generate()],
-        });
-        assert.ok(false, "A third party should not be able to revoke an account!");
-      }
-      catch (err) {
-        assert.ok(err.message.indexOf("unknown signer") !== -1,
+    // An error should be thrown when a revoke is invoked with a third-party signer.
+    try {
+      await program.rpc.revoke({
+        accounts: {
+          owner: owner.publicKey,
+          mint: mint.publicKey,
+          vaultAccount: vaultAccount,
+          ownerTokenAccount: ownerTokenAccount.address,
+          vestingAccount: vestingAccount,
+          vaultAuthority: vaultAuthority,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        },
+        signers: [anchor.web3.Keypair.generate()],
+      });
+      assert.ok(false, "A third party should not be able to revoke an account!");
+    }
+    catch (err) {
+      assert.ok(err.message.indexOf("unknown signer") !== -1,
         "A third party should not be able to revoke an account!");
-      }
+    }
 
-      let _vestingAccount = await program.account.vestingAccount.fetch(
-        vestingAccount
-      );
+    let _vestingAccount = await program.account.vestingAccount.fetch(
+      vestingAccount
+    );
 
-      assert.ok(
-        _vestingAccount.releasedAmount.toNumber() === 0,
-        "Not all funds have been released at completion."
-      );
+    assert.ok(
+      _vestingAccount.releasedAmount.toNumber() === 0,
+      "Not all funds have been released at completion."
+    );
   });
 
+  /// Generic function to set up a vesting account with a new mint.
   async function setupVestingAccount(
     startTs: anchor.BN,
     cliffTs: anchor.BN,
     duration: anchor.BN,
     revocable: boolean
   ) {
+    // Create a new token mint.
     let mint = await Token.createMint(
       provider.connection,
       mintAuthority,
