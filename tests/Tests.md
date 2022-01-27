@@ -14,5 +14,6 @@
 * As the beneficiary I should not be able to receive any more than the vested amount when the treasury is revoked.
 * As the owner I should be able to receive the full amount before the cliff is reached.
 * As the owner I should not be able to revoke at all if revoke is set to false.
+* As the owner I should not be able to revoke twice.
 ## Security
 * As a third party I should not be able to invoke the revoke functionality.
